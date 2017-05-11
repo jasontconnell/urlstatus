@@ -25,6 +25,8 @@ func init(){
 
 
 func main(){
+    flag.Parse()
+
     client := &http.Client{
         CheckRedirect: noRedirect,
     }
@@ -51,7 +53,10 @@ func main(){
             case "status":
                 stat := getStatus(client, csv[0])
 
-                fmt.Sprintf("%v, %v", stat, csv[0])
+                if stat != 200 {
+                    line := fmt.Sprintf("%v, %v", stat, csv[0])
+                    fmt.Println(line)
+                }
             }
 
             
