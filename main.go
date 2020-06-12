@@ -59,7 +59,14 @@ func main() {
 
 	urls := []Line{}
 	for _, line := range lines {
-		u := Line{URL: line[0], Result: line[1]}
+		var u Line
+
+		switch mode {
+		case Redirect:
+			u = Line{URL: line[0], Result: line[1]}
+		case Status:
+			u = Line{URL: line[0]}
+		}
 		urls = append(urls, u)
 	}
 
