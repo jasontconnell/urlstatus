@@ -5,20 +5,29 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
+	"sort"
 	"strings"
+	"sync"
+	"time"
 )
 
 func noRedirect(req *http.Request, via []*http.Request) error {
 	return errors.New("no redirect")
 }
 
-type Line struct {
+type UrlLine struct {
 	URL    string
 	Result string
+	Index  int
+}
+
+type Result struct {
+	Text  string
+	Index int
 }
 
 type Mode int
@@ -28,11 +37,23 @@ const (
 	Redirect
 )
 
+func modeHeader(mode Mode) string {
+	h := "Status Code, Url"
+	if mode == Redirect {
+		h = "Result, Url, Location, Expected"
+	}
+	return h
+}
+
 func main() {
 	base := flag.String("b", "", "base domain name for when list is relative urls")
 	csvFilename := flag.String("c", "", "csv filename")
 	modestr := flag.String("m", "status", "processing mode. (status or redirect)")
+	output := flag.String("o", "stdout", "output file or stdout")
+	batchsize := flag.Int("batch", 15, "batch size")
 	flag.Parse()
+
+	start := time.Now()
 
 	mode := Status
 	if *modestr == "redirect" {
@@ -40,12 +61,41 @@ func main() {
 	}
 
 	if *csvFilename == "" {
-		fmt.Println("Usage: urlstatus -c filename.csv -m mode(status or redirect)")
+		fmt.Println("Usage: urlstatus -c filename.csv -m mode(status or redirect) -o outputfile(optional, defaults to stdout) -batch batchsize(defaults to 15 per batch)")
 		flag.PrintDefaults()
 		return
 	}
 
-	f, err := os.Open(*csvFilename)
+	urls, err := readCSV(*csvFilename)
+	if err != nil {
+		log.Fatalf("couldn't read file %s: %s", *csvFilename, err.Error())
+	}
+
+	log.Println("Processing", len(urls), "urls in batches of", *batchsize)
+	results := process(*base, urls, mode, *batchsize)
+
+	var w io.Writer
+	if *output == "stdout" {
+		w = os.Stdout
+	} else {
+		f, err := os.OpenFile(*output, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+		if err != nil {
+			fmt.Println("couldn't open file, writing to stdout instead")
+		}
+		defer f.Close()
+		w = f
+	}
+
+	fmt.Fprintln(w, modeHeader(mode))
+	for _, r := range results {
+		fmt.Fprintln(w, r.Text)
+	}
+
+	fmt.Println("\n\nFinished.", len(urls), "processed.", time.Since(start))
+}
+
+func readCSV(filename string) ([]UrlLine, error) {
+	f, err := os.Open(filename)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -54,94 +104,97 @@ func main() {
 	csvreader := csv.NewReader(f)
 	lines, err := csvreader.ReadAll()
 	if err != nil {
-		log.Fatalf("reading file %s %v", *csvFilename, err)
+		return nil, err
 	}
 
-	urls := []Line{}
-	for _, line := range lines {
-		var u Line
-
-		switch mode {
-		case Redirect:
-			u = Line{URL: line[0], Result: line[1]}
-		case Status:
-			u = Line{URL: line[0]}
+	urls := []UrlLine{}
+	for i, line := range lines {
+		u := UrlLine{Index: i, URL: line[0]}
+		if len(line) > 1 {
+			u.Result = line[1]
 		}
 		urls = append(urls, u)
 	}
-
-	results := process(*base, urls, mode)
-
-	for _, r := range results {
-		fmt.Println(r)
-	}
+	return urls, nil
 }
 
-func process(baseUrl string, lines []Line, mode Mode) []string {
+func process(baseUrl string, list []UrlLine, mode Mode, batchsize int) []Result {
 	client := &http.Client{
 		CheckRedirect: noRedirect,
 	}
 
-	results := []string{}
-	switch mode {
-	case Redirect:
-		results = append(results, "RESULT, FULL URL, ACTUAL, EXPECTED")
-	case Status:
-		results = append(results, "RESULT, FULL URL")
+	rchan := make(chan Result, len(list))
+
+	var wg sync.WaitGroup
+	pools := len(list)/batchsize + 1
+	wg.Add(pools)
+
+	for i := 0; i < pools; i++ {
+		start := i * batchsize
+		end := (i + 1) * batchsize
+		if end > len(list) {
+			end = len(list)
+		}
+		go func(chunk []UrlLine, ch chan Result) {
+			for _, line := range chunk {
+				result := processOne(client, baseUrl, line, mode)
+				ch <- Result{Text: result, Index: line.Index}
+			}
+			wg.Done()
+		}(list[start:end], rchan)
 	}
 
-	for _, line := range lines {
-		test := line.URL
-		if baseUrl != "" {
-			test = baseUrl + test
-		}
-		switch mode {
-		case Redirect:
-			if redir, isredir := getRedirect(client, test); isredir {
-				if !strings.HasSuffix(redir, line.Result) {
-					results = append(results, fmt.Sprintf("FAILURE, %s, %s, %s", test, redir, line.Result))
-					//fmt.Printf("Wrong: For %s expected %s got %s\n", test, line.Result, redir)
-				} else {
-					results = append(results, fmt.Sprintf("SUCCESS, %s, %s, %s", test, redir, line.Result))
-				}
+	start := time.Now()
+	go func(ch chan Result) {
+		for {
+			select {
+			case <-time.After(3 * time.Second):
+				fmt.Printf("\r\tprocessed: %d. time: %v", len(ch), time.Since(start))
 			}
-		case Status:
-			status := getStatus(client, test)
-			results = append(results, fmt.Sprintf("%d, %s", status, test))
 		}
+	}(rchan)
+
+	wg.Wait()
+	close(rchan)
+
+	var results []Result
+	for s := range rchan {
+		results = append(results, s)
 	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Index < results[j].Index
+	})
 	return results
 }
 
-func getStatus(client *http.Client, src string) int {
-	req, _ := http.NewRequest("GET", src, nil)
-	resp, _ := client.Do(req)
-	if resp != nil {
-		return resp.StatusCode
+func processOne(client *http.Client, baseUrl string, line UrlLine, mode Mode) string {
+	var result string
+	test := baseUrl + line.URL
+	status, redir := getResult(client, test)
+	switch mode {
+	case Redirect:
+		resstr := "SUCCESS"
+		if !strings.HasSuffix(redir, line.Result) {
+			resstr = "FAILURE"
+		}
+		result = fmt.Sprintf("%s, %s, %s, %s", resstr, test, redir, line.Result)
+	case Status:
+		result = fmt.Sprintf("%d, %s", status, test)
 	}
-
-	return -1
+	return result
 }
 
-func getRedirect(client *http.Client, src string) (string, bool) {
-	srcURL, _ := url.Parse(src)
-
-	req, _ := http.NewRequest("GET", src, nil)
-
+func getResult(client *http.Client, url string) (int, string) {
+	req, _ := http.NewRequest("GET", url, nil)
 	resp, _ := client.Do(req)
 	if resp != nil {
-		if resp.StatusCode == 301 || resp.StatusCode == 302 {
-			redir := resp.Header["Location"][0]
-			destURL, _ := url.Parse(redir)
-
-			if !destURL.IsAbs() {
-				return srcURL.Scheme + "://" + srcURL.Hostname() + redir, true
-			} else {
-				return destURL.String(), true
-			}
-
+		var redir string
+		if resp.StatusCode > 300 && resp.StatusCode < 308 {
+			redir = resp.Header.Get("Location")
 		}
+		return resp.StatusCode, redir
 	}
 
-	return "", false
+	return -1, ""
 }
