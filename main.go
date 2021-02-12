@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -74,16 +73,15 @@ func main() {
 	log.Println("Processing", len(urls), "urls in batches of", *batchsize)
 	results := process(*base, urls, mode, *batchsize)
 
-	var w io.Writer
-	if *output == "stdout" {
-		w = os.Stdout
-	} else {
+	w := os.Stdout
+	if *output != "stdout" {
 		f, err := os.OpenFile(*output, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
 		if err != nil {
 			fmt.Println("couldn't open file, writing to stdout instead")
+		} else {
+			w = f
+			defer f.Close()
 		}
-		defer f.Close()
-		w = f
 	}
 
 	fmt.Fprintln(w, modeHeader(mode))
