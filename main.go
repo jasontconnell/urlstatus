@@ -14,8 +14,10 @@ import (
 	"time"
 )
 
+var NoRedirect error = errors.New("no redirect")
+
 func noRedirect(req *http.Request, via []*http.Request) error {
-	return errors.New("no redirect")
+	return NoRedirect
 }
 
 type UrlLine struct {
@@ -119,6 +121,7 @@ func readCSV(filename string) ([]UrlLine, error) {
 func process(baseUrl string, list []UrlLine, mode Mode, batchsize int) []Result {
 	client := &http.Client{
 		CheckRedirect: noRedirect,
+		Timeout:       10 * time.Second,
 	}
 
 	rchan := make(chan Result, len(list))
@@ -172,11 +175,16 @@ func processOne(client *http.Client, baseUrl string, line UrlLine, mode Mode) st
 	status, redir := getResult(client, test)
 	switch mode {
 	case Redirect:
-		resstr := "SUCCESS"
-		if !strings.HasSuffix(redir, line.Result) {
-			resstr = "FAILURE"
+		if status > 0 {
+			resstr := "SUCCESS"
+			if !strings.HasSuffix(redir, line.Result) {
+				resstr = "FAILURE"
+			}
+			result = fmt.Sprintf("%s, %s, %s, %s", resstr, test, redir, line.Result)
+		} else {
+			// in this case redir is an error message
+			result = fmt.Sprintf("ERROR, %s, %s, %s", test, "", redir)
 		}
-		result = fmt.Sprintf("%s, %s, %s, %s", resstr, test, redir, line.Result)
 	case Status:
 		result = fmt.Sprintf("%d, %s", status, test)
 	}
