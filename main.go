@@ -196,7 +196,7 @@ func getResult(client *http.Client, url string) (int, string) {
 	resp, _ := client.Do(req)
 	if resp != nil {
 		var redir string
-		if resp.StatusCode > 300 && resp.StatusCode < 308 {
+		if resp.StatusCode > 300 && resp.StatusCode < 309 {
 			redir = resp.Header.Get("Location")
 		}
 		return resp.StatusCode, redir
